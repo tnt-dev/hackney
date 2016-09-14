@@ -100,19 +100,22 @@ wait_headers({more, Parser}, Client, Status, Headers) ->
         Error  ->
             Error
     end;
-wait_headers({header, {Key, Value}=KV, Parser}, Client, Status, Headers) ->
+wait_headers({header, {Key, _Value}=KV, Parser}, #client{method=Method}=Client,
+             Status, Headers) ->
     Client1 = case hackney_bstr:to_lower(Key) of
         <<"content-length">> ->
-            CLen = list_to_integer(binary_to_list(Value)),
-            Client#client{clen=CLen};
+            case hackney_http:get(Parser, content_length) of
+                undefined when Method == <<"HEAD">> -> Client;
+                CLen                                -> Client#client{clen=CLen}
+            end;
         <<"transfer-encoding">> ->
-            Client#client{te=hackney_bstr:to_lower(Value)};
+            Client#client{te=hackney_http:get(Parser, transfer_encoding)};
         <<"connection">> ->
-            Client#client{connection=hackney_bstr:to_lower(Value)};
+            Client#client{connection=hackney_http:get(Parser, connection)};
         <<"content-type">> ->
-            Client#client{ctype=Value};
+            Client#client{ctype=hackney_http:get(Parser, content_type)};
         <<"location">> ->
-            Client#client{location=Value};
+            Client#client{location=hackney_http:get(Parser, location)};
         _ ->
             Client
     end,
