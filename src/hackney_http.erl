@@ -300,8 +300,10 @@ parse_header(Line, St) ->
     end,
     St1 = case hackney_bstr:to_lower(hackney_bstr:trim(Key)) of
         <<"content-length">> ->
-            CLen = list_to_integer(binary_to_list(hackney_bstr:trim(Value))),
-            St#hparser{clen=CLen};
+            case hackney_bstr:trim(Value) of
+                <<>> -> St;
+                CLen -> St#hparser{clen=list_to_integer(binary_to_list(CLen))}
+            end;
         <<"transfer-encoding">> ->
             TE = hackney_bstr:to_lower(hackney_bstr:trim(Value)),
             St#hparser{te=TE};
@@ -334,24 +336,23 @@ parse_trailers(St, Acc) ->
         _ -> error
     end.
 
-parse_body(St=#hparser{body_state=waiting, te=TE, clen=Length,
-                       method=Method, buffer=Buffer}) ->
-	case TE of
-		<<"chunked">> ->
-			parse_body(St#hparser{body_state=
-				{stream, fun te_chunked/2, {0, 0}, fun ce_identity/1}});
-		_ when Length =:= 0 orelse Method =:= <<"HEAD">> ->
-            {done, Buffer};
-        _ ->
-		    parse_body(St#hparser{body_state=
-						{stream, fun te_identity/2, {0, Length},
-						 fun ce_identity/1}})
-	end;
+
+parse_body(St=#hparser{body_state=waiting, te= <<"chunked">>}) ->
+    BodyState = {stream, fun te_chunked/2, {0, 0}, fun ce_identity/1},
+    parse_body(St#hparser{body_state=BodyState});
+parse_body(#hparser{body_state=waiting, clen=Length,
+                    method=Method, buffer=Buffer})
+  when Length =:= 0 orelse Method =:= <<"HEAD">> ->
+    {done, Buffer};
+parse_body(St=#hparser{body_state=waiting, clen=Length})
+  when is_integer(Length) ->
+    BodyState = {stream, fun te_identity/2, {0, Length}, fun ce_identity/1},
+    parse_body(St#hparser{body_state=BodyState});
 parse_body(#hparser{body_state=done, buffer=Buffer}) ->
-	{done, Buffer};
+    {done, Buffer};
 parse_body(St=#hparser{buffer=Buffer, body_state={stream, _, _, _}})
-		when byte_size(Buffer) > 0 ->
-	transfer_decode(Buffer, St#hparser{buffer= <<>>});
+  when byte_size(Buffer) > 0 ->
+    transfer_decode(Buffer, St#hparser{buffer= <<>>});
 parse_body(St) ->
     {more, St, <<>>}.
 
