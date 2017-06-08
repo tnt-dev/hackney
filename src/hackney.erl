@@ -13,7 +13,7 @@
          request/1, request/2, request/3, request/4, request/5,
          send_request/2, send_request/3,
          start_response/1,
-         cookies/1,
+         cookies/1, cookies/2,
          send_body/2, finish_send_body/1,
          send_multipart_body/2,
          body/1, body/2, skip_body/1,
@@ -433,13 +433,19 @@ start_response(Ref) ->
 %% return all parsed cookies from the response headers.
 -spec cookies(list()) -> list().
 cookies(Headers) ->
+  cookies(Headers, []).
+
+-spec cookies(list(), [raw]) -> list().
+cookies(Headers, Opts) ->
+  Raw = proplists:get_value(raw, Opts, false),
   lists:foldl(fun({K, V}, Acc) ->
                   case hackney_bstr:to_lower(K) of
                     <<"set-cookie">> ->
                       case hackney_cookie:parse_cookie(V) of
                         {error, _} -> Acc;
-                        [{Name, _} | _]=Cookie ->
-                          [{Name, Cookie} | Acc]
+                        [{Name, _} | _]=Cookie when not Raw ->
+                          [{Name, Cookie} | Acc];
+                        _ -> [V | Acc]
                       end;
                     _ ->
                       Acc
@@ -727,7 +733,7 @@ maybe_redirect(Resp, _Req) ->
 maybe_redirect1(Location, {ok, S, H, #client{retries=Tries}=Client}=Resp, Req) ->
   {Method, _Path, Headers, Body} = Req,
   case lists:member(S, [301, 302, 307]) of
-    true  ->
+    true ->
       ?report_debug("redirect request", [{location, Location},
                                          {req, Req},
                                          {resp, Resp},
@@ -737,14 +743,11 @@ maybe_redirect1(Location, {ok, S, H, #client{retries=Tries}=Client}=Resp, Req) -
       %% `{ok, {maybe_redirect, Status, Headers, Client}}' to let
       %% the  user make his choice.
       case lists:member(Method, [get, head]) of
-        true ->
+        false when Client#client.force_redirect =:= false ->
+          {ok, {maybe_redirect, S, H, Client}};
+        _ ->
           NewReq = {Method, Location, Headers, Body},
-          maybe_redirect(redirect(Client#client{retries=Tries-1}, NewReq), Req);
-        false when Client#client.force_redirect =:= true ->
-          NewReq = {Method, Location, Headers, Body},
-          maybe_redirect(redirect(Client#client{retries=Tries-1}, NewReq), Req);
-        false ->
-          {ok, {maybe_redirect, S, H, Client}}
+          maybe_redirect(redirect(Resp, NewReq), Req)
       end;
     false when S =:= 303 andalso (Method =:= post orelse
       Client#client.force_redirect =:= true) ->
@@ -756,7 +759,7 @@ maybe_redirect1(Location, {ok, S, H, #client{retries=Tries}=Client}=Resp, Req) -
                                          {tries, Tries}]),
 
       NewReq = {get, Location, hackney_headers_new:new(), <<>>},
-      maybe_redirect(redirect(Client#client{retries=Tries-1}, NewReq), Req);
+      maybe_redirect(redirect(Resp, NewReq), Req);
     false when S =:= 303 ->
       ?report_debug("invalid redirection", [{location, Location},
                                             {req, Req},
@@ -767,7 +770,9 @@ maybe_redirect1(Location, {ok, S, H, #client{retries=Tries}=Client}=Resp, Req) -
       Resp
   end.
 
-redirect(Client0, {Method, NewLocation, Headers, Body}) ->
+redirect({ok, _RespS, RespH, #client{retries=Retries}=RespClient},
+         {Method, NewLocation, Headers, Body}) ->
+  Client0 = RespClient#client{retries=Retries-1},
   %% skip the body
   {skip, Client} = hackney_response:skip_body(Client0),
 
@@ -787,28 +792,37 @@ redirect(Client0, {Method, NewLocation, Headers, Body}) ->
           redirect=Redirect} = Client,
 
 
-  NewHeaders = case RedirectHost of
+  Headers1 = case RedirectHost of
                  Host -> Headers;
                  _    ->
                    hackney_headers_new:store(<<"Host">>,
                                              hackney_bstr:to_binary(RedirectHost),
                                              Headers)
                end,
-  RedirectRequest = make_request(Method, RedirectUrl, NewHeaders, Body,
+  %% delete old 'cookie' header
+  Headers2 = proplists:delete(<<"Cookie">>, Headers1),
+
+  RedirectRequest = make_request(Method, RedirectUrl, Headers2, Body,
                                  Client#client.options, false),
+
+  %% set new cookies
+  Cookies = lists:flatten([proplists:get_value(cookie, Opts0, [])]),
+  Opts1 = lists:keystore(cookie, 1, Opts0,
+                         {cookie, Cookies ++ cookies(RespH, [raw])}),
   %% make a request without any redirection
-  Opts = lists:keystore(follow_redirect, 1, Opts0, {follow_redirect, false}),
+  Opts2 = lists:keystore(follow_redirect, 1, Opts1, {follow_redirect, false}),
+
   Client1 = hackney_connect:check_or_close(Client),
 
   %% update the state with the redirect info
   Client2 = Client1#client{transport=RedirectTransport,
                            host=RedirectHost,
                            port=RedirectPort,
-                           options=Opts},
+                           options=Opts2},
 
   %% send a request to the new location
   case send_request(Client2, RedirectRequest) of
-    {ok,  S, H, RedirectRef} when is_reference(RedirectRef) ->
+    {ok, S, H, RedirectRef} when is_reference(RedirectRef) ->
       RedirectState = hackney_manager:get_state(RedirectRef),
       RedirectState1 = case Redirect of
                          nil ->
@@ -826,7 +840,7 @@ redirect(Client0, {Method, NewLocation, Headers, Body}) ->
                                                 options=Opts0}
                        end,
       {ok, S, H, RedirectState1};
-    {ok,  S, H, #client{}=RedirectClient} when Redirect /= nil ->
+    {ok, S, H, #client{}=RedirectClient} when Redirect /= nil ->
       NewClient = RedirectClient#client{redirect=Redirect,
                                         follow_redirect=FollowRedirect,
                                         max_redirect=MaxRedirect,
