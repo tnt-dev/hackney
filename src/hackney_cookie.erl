@@ -60,7 +60,7 @@ setcookie(Name, Value, Opts) ->
                   false -> <<>>;
                   {_, true} -> <<"; HttpOnly">>
                 end,
-  iolist_to_binary([Name, <<"=">>, Value, <<"; Version=1">>,
+  iolist_to_binary([Name, <<"=">>, Value,
     MaxAgeBin, DomainBin, PathBin, SecureBin,
     HttpOnlyBin]).
 

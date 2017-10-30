@@ -586,7 +586,14 @@ make_multipart_stream(Parts, Boundary) ->
 
 
 maybe_add_cookies([], Headers) ->
-  Headers;
+  NewCookie = lists:foldl(fun({<<"Cookie">>, B}, <<>>) ->
+                              B;
+                             ({<<"Cookie">>, B}, Acc) ->
+                              <<Acc/binary, "; ", B/binary>>;
+                             (_, Acc) ->
+                              Acc
+                          end, <<>>, Headers),
+  [{<<"Cookie">>, NewCookie} | proplists:delete(<<"Cookie">>, Headers)];
 maybe_add_cookies(Cookie, Headers) when is_binary(Cookie) ->
   Headers ++ [{<<"Cookie">>, Cookie}];
 maybe_add_cookies({Name, Value}, Headers) ->
